@@ -1,0 +1,82 @@
+#!/usr/bin/env sage
+import json, os, random
+from hashlib import sha256
+from Crypto.Cipher import AES
+
+A,B = 180, 67
+P = 2**A * 3**B - 1
+assert is_prime(P) and P%4==3
+Fp2.<i> = GF(P**2, modulus=x**2+1)
+E0 = EllipticCurve(Fp2, [0,6,0,1,0]); E0.set_order((P+1)**2)
+
+def _tb(E, l, e):
+    n = (P+1)//l**e
+    return tuple(n*G for G in E.gens())
+
+P2,Q2 = _tb(E0,2,A)
+P3,Q3 = _tb(E0,3,B)
+
+set_random_seed(int.from_bytes(os.urandom(32),'big'))
+while True:
+    K = randrange(1, 3**B)
+    if K%3: break
+
+ker = P3 + K*Q3
+ph  = E0.isogeny(ker, algorithm='factored')
+EB  = ph.codomain(); EB.set_order((P+1)**2, num_checks=0)
+pP, pQ = ph(P2), ph(Q2)
+
+N = int(2**A)
+rng = random.SystemRandom()
+while True:
+    a = rng.randrange(1, N)|1
+    b = int(pow(a, -1, N))
+    nk = int(A)//2
+    ai = sorted(rng.sample(range(int(A)), nk))
+    bi = sorted(rng.sample(range(int(A)), nk))
+    ak = {j:(int(a)>>j)&1 for j in ai}
+    bk = {j:(int(b)>>j)&1 for j in bi}
+    cs = [(1,1)]
+    for L in range(1, A):
+        nc=[]
+        for x_,y_ in cs:
+            r=((x_*y_-1)>>L)&1
+            for u in (0,1):
+                if L in ak and u!=ak[L]: continue
+                v=(r-u)&1
+                if L in bk and v!=bk[L]: continue
+                nc.append((x_|(u<<L), y_|(v<<L)))
+        cs=nc
+        if len(cs)>60:
+            cs=None; break
+    if cs is not None and (a,b) in cs: break
+
+PM = a*pP; QM = b*pQ
+
+try: F = open('flag.txt','rb').read().strip()
+except FileNotFoundError: F = b'HTB{fake_flag_for_testing}'
+
+key = sha256(str(K).encode()).digest()
+nc  = b'\x00'*12
+ct, tg = AES.new(key, AES.MODE_GCM, nonce=nc).encrypt_and_digest(F)
+
+def _sp(X):
+    if X == X.curve()(0): return {'inf':True}
+    return {'x':[hex(int(X[0][0])),hex(int(X[0][1]))],
+            'y':[hex(int(X[1][0])),hex(int(X[1][1]))]}
+
+EBa = EB.a_invariants()
+out = {
+  'parameters':{'a_2tor_exp':int(A),'b_3tor_exp':int(B),'p':hex(int(P)),
+                'Fp2_modulus':'x^2 + 1'},
+  'E_start_a_invariants':['0','6','0','1','0'],
+  'E_pub_a_invariants':[[hex(int(c[0])),hex(int(c[1]))]
+                         for c in (Fp2(z) for z in EBa)],
+  'P2':_sp(P2),'Q2':_sp(Q2),'Pmask':_sp(PM),'Qmask':_sp(QM),
+  'leak':{'alpha_indices':[int(j) for j in ai],
+          'alpha_bits':[int(ak[j]) for j in ai],
+          'beta_indices':[int(j) for j in bi],
+          'beta_bits':[int(bk[j]) for j in bi]},
+  'ciphertext':{'nonce_hex':nc.hex(),'ct_hex':ct.hex(),'tag_hex':tg.hex()},
+}
+open('output.json','w').write(json.dumps(out, indent=2))
